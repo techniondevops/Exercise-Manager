@@ -89,6 +89,19 @@ jobs:
         run: |
           cd terraform
           terraform init
+      - name: Debug SSH Key
+        env:
+          TF_VAR_public_key_content: ${{ secrets.SSH_PUBLIC_KEY }}
+        run: |
+          if [ -z "$TF_VAR_public_key_content" ]; then
+            echo " ERROR: SSH_PUBLIC_KEY is empty or not set!"
+            exit 1
+          else
+            echo " SSH_PUBLIC_KEY is set"
+            echo "Key length: ${#TF_VAR_public_key_content} characters"
+            echo "Key starts with: ${TF_VAR_public_key_content:0:20}..."
+            echo "Key ends with: ...${TF_VAR_public_key_content: -20}"
+          fi
 
       - name: Terraform Plan
         env:
@@ -96,6 +109,20 @@ jobs:
         run: |
           cd terraform
           terraform plan
+
+      - name: Terraform Apply
+        env:
+          TF_VAR_public_key_content: ${{ secrets.SSH_PUBLIC_KEY }}
+        run: |
+          cd terraform
+          terraform apply -auto-approve
+
+      - name: Terraform Plan
+        env:
+          TF_VAR_public_key_content: ${{ secrets.SSH_PUBLIC_KEY }}
+        run: |
+          cd terraform
+          terraform plan -auto-approve
 
       - name: Terraform Apply
         env:
