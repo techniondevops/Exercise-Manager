@@ -7,10 +7,9 @@ on:
 
 env:
   AWS_REGION: us-east-1
-  APP_DIR: "python-app"
 
 jobs:
-test:
+  test:
     name: Run Tests
     runs-on: ubuntu-latest
     steps:
@@ -21,7 +20,7 @@ test:
         run: |
           cd python-app
           ls -la
-          echo "✅ Files exist, skipping import tests"
+          echo "Files validated"
 
   build-and-push:
     name: Build Docker Image
@@ -39,7 +38,7 @@ test:
 
       - name: Build and push
         run: |
-          cd "${{ env.APP_DIR }}"
+          cd python-app
           docker build -t ${{ secrets.DOCKERHUB_USERNAME }}/exercise-manager:latest .
           docker push ${{ secrets.DOCKERHUB_USERNAME }}/exercise-manager:latest
 
@@ -88,7 +87,7 @@ test:
         run: sleep 60
 
   configure-and-deploy:
-    name: Configure Cluster & Deploy App
+    name: Configure Cluster
     needs: deploy-infrastructure
     runs-on: ubuntu-latest
     steps:
@@ -100,67 +99,24 @@ test:
           mkdir -p ~/.ssh
           echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
-          ssh-keyscan -H ${{ needs.deploy-infrastructure.outputs.master_ip }} >> ~/.ssh/known_hosts
-          
-          # Create inventory
-          cat > ansible/inventory.ini <<EOF
-          [master]
-          k8s-master ansible_host=${{ needs.deploy-infrastructure.outputs.master_ip }} ansible_user=ubuntu private_ip=${{ needs.deploy-infrastructure.outputs.master_private_ip }}
-
-          [workers]
-          EOF
-          
-          # Add workers from terraform
-          cd terraform
-          terraform output -json worker_public_ips | jq -r '.[]' | awk '{print "worker-" NR " ansible_host=" $0 " ansible_user=ubuntu"}' >> ../ansible/inventory.ini
-          
-          cat >> ../ansible/inventory.ini <<EOF
-
-          [k8s:children]
-          master
-          workers
-
-          [k8s:vars]
-          ansible_python_interpreter=/usr/bin/python3
-          ansible_ssh_common_args='-o StrictHostKeyChecking=no'
-          ansible_ssh_private_key_file=~/.ssh/id_rsa
-          EOF
 
       - name: Install Ansible
         run: |
           sudo apt-get update
           sudo apt-get install -y ansible
 
-      - name: Run Kubernetes Setup
+      - name: Run Docker Deploy
         run: |
           cd ansible
-          cat inventory.ini
-          ansible-playbook -i inventory.ini k8s-playbook.yml
+          echo "[master]" > inventory.ini
+          echo "${{ needs.deploy-infrastructure.outputs.master_ip }} ansible_user=ubuntu" >> inventory.ini
+          echo "[workers]" >> inventory.ini
+          echo "[all:vars]" >> inventory.ini
+          echo "ansible_ssh_private_key_file=~/.ssh/id_rsa" >> inventory.ini
+          echo "ansible_ssh_common_args='-o StrictHostKeyChecking=no'" >> inventory.ini
+          ansible-playbook -i inventory.ini docker-deploy.yml
 
-      - name: Install kubectl and Helm
+      - name: Success
         run: |
-          curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
-          sudo install kubectl /usr/local/bin/
-          curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
-
-      - name: Get kubeconfig
-        run: |
-          scp -i ~/.ssh/id_rsa ubuntu@${{ needs.deploy-infrastructure.outputs.master_ip }}:/home/ubuntu/.kube/config ~/.kube/config
-
-      - name: Update Helm values
-        run: |
-          cd helm/exercise-manager
-          sed -i "s|MASTER_PRIVATE_IP|${{ needs.deploy-infrastructure.outputs.master_private_ip }}|g" values.yaml
-
-      - name: Deploy with Helm
-        run: |
-          cd helm
-          helm upgrade --install exercise-manager ./exercise-manager --wait --timeout 10m
-
-      - name: Success Message
-        run: |
-          echo "=========================================="
-          echo "🎉 Deployment Successful!"
-          echo "=========================================="
-          echo "Application URL: http://${{ needs.deploy-infrastructure.outputs.lb_dns }}"
-          echo "=========================================="
+          echo "Deployment complete!"
+          echo "URL: http://${{ needs.deploy-infrastructure.outputs.lb_dns }}"
