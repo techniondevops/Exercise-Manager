@@ -73,8 +73,8 @@ jobs:
         run: |
           cd terraform
           terraform init
-          terraform apply -auto-approve
-
+          terraform apply -auto-approve -var="public_key_content=${{ secrets.PUBLIC_KEY_CONTENT }}"
+          
       - name: Get IPs
         id: get-ips
         run: |
