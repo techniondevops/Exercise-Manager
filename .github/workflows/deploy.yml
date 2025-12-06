@@ -111,6 +111,14 @@ jobs:
           cd terraform
           terraform plan
 
+      - name: Terraform Destroy (Clean up old resources)
+        env:
+          TF_VAR_public_key_content: ${{ secrets.SSH_PUBLIC_KEY }}
+        run: |
+          cd terraform
+          terraform destroy -auto-approve
+        continue-on-error: true    
+
       - name: Terraform Apply
         env:
           TF_VAR_public_key_content: ${{ secrets.SSH_PUBLIC_KEY }}
