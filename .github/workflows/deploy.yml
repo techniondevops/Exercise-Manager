@@ -117,20 +117,6 @@ jobs:
           cd terraform
           terraform apply -auto-approve
 
-      - name: Terraform Plan
-        env:
-          TF_VAR_public_key_content: ${{ secrets.SSH_PUBLIC_KEY }}
-        run: |
-          cd terraform
-          terraform plan -auto-approve
-
-      - name: Terraform Apply
-        env:
-          TF_VAR_public_key_content: ${{ secrets.SSH_PUBLIC_KEY }}
-        run: |
-          cd terraform
-          terraform apply -auto-approve
-
       - name: Save Terraform Outputs
         id: terraform-output
         run: |
