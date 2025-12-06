@@ -1,0 +1,238 @@
+name: Deploy Exercise Manager
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+env:
+  DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+  AWS_REGION: us-east-1
+
+jobs:
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          cd "python - app"
+          pip install -r requirements.txt
+          pip install pytest
+
+      - name: Run basic tests
+        run: |
+          cd "python - app"
+          python3 -c "import app; print('✅ App imports successfully')"
+          python3 -c "from app import app; print('✅ Flask app created')"
+
+  build-and-push:
+    name: Build and Push Docker Image
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push Docker image
+        run: |
+          cd "python - app"
+          docker build -t ${{ secrets.DOCKERHUB_USERNAME }}/exercise-manager:latest .
+          docker build -t ${{ secrets.DOCKERHUB_USERNAME }}/exercise-manager:${{ github.sha }} .
+          docker push ${{ secrets.DOCKERHUB_USERNAME }}/exercise-manager:latest
+          docker push ${{ secrets.DOCKERHUB_USERNAME }}/exercise-manager:${{ github.sha }}
+
+  provision-infrastructure:
+    name: Provision AWS Infrastructure
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    outputs:
+      master_ip: ${{ steps.terraform-output.outputs.MASTER_IP }}
+      master_private_ip: ${{ steps.terraform-output.outputs.MASTER_PRIVATE_IP }}
+      lb_dns: ${{ steps.terraform-output.outputs.LB_DNS }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: 1.5.0
+          terraform_wrapper: false
+
+      - name: Terraform Init
+        run: |
+          cd terraform
+          terraform init
+
+      - name: Terraform Plan
+        run: |
+          cd terraform
+          terraform plan
+
+      - name: Terraform Apply
+        run: |
+          cd terraform
+          terraform apply -auto-approve
+
+      - name: Save Terraform Outputs
+        id: terraform-output
+        run: |
+          cd terraform
+          echo "MASTER_IP=$(terraform output -raw master_public_ip)" >> $GITHUB_OUTPUT
+          echo "MASTER_PRIVATE_IP=$(terraform output -raw master_private_ip)" >> $GITHUB_OUTPUT
+          echo "LB_DNS=$(terraform output -raw load_balancer_dns)" >> $GITHUB_OUTPUT
+          
+          # Save outputs to file for next jobs
+          terraform output -json > /tmp/terraform-outputs.json
+
+      - name: Upload Terraform outputs
+        uses: actions/upload-artifact@v3
+        with:
+          name: terraform-outputs
+          path: /tmp/terraform-outputs.json
+
+      - name: Upload Ansible inventory
+        uses: actions/upload-artifact@v3
+        with:
+          name: ansible-inventory
+          path: ansible/inventory.ini
+
+  configure-kubernetes:
+    name: Configure Kubernetes Cluster
+    needs: provision-infrastructure
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Download Terraform outputs
+        uses: actions/download-artifact@v3
+        with:
+          name: terraform-outputs
+          path: /tmp/
+
+      - name: Download Ansible inventory
+        uses: actions/download-artifact@v3
+        with:
+          name: ansible-inventory
+          path: ansible/
+
+      - name: Set up SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ needs.provision-infrastructure.outputs.master_ip }} >> ~/.ssh/known_hosts
+
+      - name: Install Ansible
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ansible
+
+      - name: Wait for EC2 instances to be ready
+        run: |
+          echo "Waiting for instances to initialize..."
+          sleep 60
+
+      - name: Test SSH connectivity
+        run: |
+          ssh -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no ubuntu@${{ needs.provision-infrastructure.outputs.master_ip }} "echo 'SSH connection successful'"
+
+      - name: Run Ansible Playbook for Kubernetes
+        run: |
+          cd ansible
+          ansible-playbook -i inventory.ini k8s-playbook.yml --private-key ~/.ssh/id_rsa -v
+
+  deploy-application:
+    name: Deploy Application with Helm
+    needs: [provision-infrastructure, configure-kubernetes]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ needs.provision-infrastructure.outputs.master_ip }} >> ~/.ssh/known_hosts
+
+      - name: Install Helm
+        run: |
+          curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+
+      - name: Install kubectl
+        run: |
+          curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
+
+      - name: Update Helm values with Master IP
+        run: |
+          cd helm/exercise-manager
+          sed -i "s|MASTER_PRIVATE_IP|${{ needs.provision-infrastructure.outputs.master_private_ip }}|g" values.yaml
+          cat values.yaml
+
+      - name: Copy kubeconfig from master
+        run: |
+          scp -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no \
+            ubuntu@${{ needs.provision-infrastructure.outputs.master_ip }}:/home/ubuntu/.kube/config \
+            ~/.kube/config
+
+      - name: Verify Kubernetes connectivity
+        run: |
+          export KUBECONFIG=~/.kube/config
+          kubectl get nodes
+          kubectl get pods --all-namespaces
+
+      - name: Deploy with Helm
+        run: |
+          export KUBECONFIG=~/.kube/config
+          cd helm
+          helm upgrade --install exercise-manager ./exercise-manager --wait --timeout 10m
+
+      - name: Verify deployment
+        run: |
+          export KUBECONFIG=~/.kube/config
+          kubectl get pods
+          kubectl get svc
+          kubectl get pv,pvc
+
+      - name: Display deployment info
+        run: |
+          echo " Deployment complete"
+          echo "================================================"
+          echo "Load Balancer DNS: ${{ needs.provision-infrastructure.outputs.lb_dns }}"
+          echo "Access your application at: http://${{ needs.provision-infrastructure.outputs.lb_dns }}"
+          echo "================================================"
+          echo ""
+          echo "Master Node IP: ${{ needs.provision-infrastructure.outputs.master_ip }}"
+          echo "SSH access: ssh -i ~/.ssh/exercise_manager_key ubuntu@${{ needs.provision-infrastructure.outputs.master_ip }}"
+          echo ""
+          echo "Direct NodePort access: http://${{ needs.provision-infrastructure.outputs.master_ip }}:30080"
