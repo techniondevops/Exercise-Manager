@@ -16,8 +16,7 @@ variable "key_name" {
   default     = "exercise-manager-key"
 }
 
-variable "public_key_path" {
-  description = "Path to your public SSH key"
+variable "public_key_content" {
+  description = "SSH public key content"
   type        = string
-  default     = "~/.ssh/id_rsa.pub"
 }
