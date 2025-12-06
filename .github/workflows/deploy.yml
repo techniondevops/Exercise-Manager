@@ -113,13 +113,14 @@ jobs:
           terraform output -json > /tmp/terraform-outputs.json
 
       - name: Upload Terraform outputs
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: terraform-outputs
           path: /tmp/terraform-outputs.json
 
       - name: Upload Ansible inventory
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
+
         with:
           name: ansible-inventory
           path: ansible/inventory.ini
