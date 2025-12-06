@@ -32,7 +32,8 @@ jobs:
         run: |
           cd python-app
           python3 -c "import main; print('✅ Main imports successfully')"
-          python3 -c "from main import app; print('✅ Flask app created')"
+          python3 -c "import functions; print('✅ Functions imports successfully')"
+          python3 -c "from main import main; print('✅ Main function exists')"
 
   build-and-push:
     name: Build and Push Docker Image
