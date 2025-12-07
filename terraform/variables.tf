@@ -13,7 +13,7 @@ variable "instance_type" {
 variable "key_name" {
   description = "Name of the SSH key pair"
   type        = string
-  default     = "exercise-manager-key"
+  default     = "vockey"
 }
 
 variable "public_key_content" {
