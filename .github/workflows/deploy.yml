@@ -102,4 +102,4 @@ jobs:
           echo "Application URL: http://${{ env.LB_DNS }}"
           echo ""
           echo "Wait 2-3 minutes for health checks, then open the URL"
-          echo "============================================"d
+          echo "============================================"
