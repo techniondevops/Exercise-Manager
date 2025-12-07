@@ -1,0 +1,175 @@
+name: Cleanup All Resources
+
+on:
+  workflow_dispatch:
+
+env:
+  AWS_REGION: us-east-1
+
+jobs:
+  cleanup:
+    name: Delete All Exercise Manager Resources
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: 1.5.0
+          terraform_wrapper: false
+
+      - name: Create SSH Key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keygen -y -f ~/.ssh/id_rsa > ~/.ssh/id_rsa.pub
+
+      - name: Try Terraform Destroy
+        continue-on-error: true
+        run: |
+          cd terraform
+          terraform init
+          terraform destroy -auto-approve \
+            -var="public_key_content=$(cat ~/.ssh/id_rsa.pub)" || true
+
+      - name: Manual Cleanup - Load Balancers
+        continue-on-error: true
+        run: |
+          echo "🧹 Deleting Load Balancers..."
+          aws elbv2 describe-load-balancers \
+            --query 'LoadBalancers[?contains(LoadBalancerName, `exercise-manager`)].LoadBalancerArn' \
+            --output text | while read arn; do
+            echo "Deleting ALB: $arn"
+            aws elbv2 delete-load-balancer --load-balancer-arn "$arn" || true
+          done
+          
+          echo "⏳ Waiting 60 seconds for ALBs to delete..."
+          sleep 60
+
+      - name: Manual Cleanup - Target Groups
+        continue-on-error: true
+        run: |
+          echo "🧹 Deleting Target Groups..."
+          aws elbv2 describe-target-groups \
+            --query 'TargetGroups[?contains(TargetGroupName, `exercise-manager`)].TargetGroupArn' \
+            --output text | while read arn; do
+            echo "Deleting TG: $arn"
+            aws elbv2 delete-target-group --target-group-arn "$arn" || true
+          done
+
+      - name: Manual Cleanup - EC2 Instances
+        continue-on-error: true
+        run: |
+          echo "🧹 Terminating EC2 Instances..."
+          aws ec2 describe-instances \
+            --filters "Name=tag:Name,Values=exercise-manager-*" \
+                      "Name=instance-state-name,Values=running,stopped,pending" \
+            --query 'Reservations[].Instances[].InstanceId' \
+            --output text | while read id; do
+            echo "Terminating: $id"
+            aws ec2 terminate-instances --instance-ids "$id" || true
+          done
+          
+          echo "⏳ Waiting 90 seconds for instances to terminate..."
+          sleep 90
+
+      - name: Manual Cleanup - Key Pairs
+        continue-on-error: true
+        run: |
+          echo "🧹 Deleting Key Pairs..."
+          aws ec2 delete-key-pair --key-name exercise-manager-key || true
+
+      - name: Manual Cleanup - Security Groups
+        continue-on-error: true
+        run: |
+          echo "🧹 Deleting Security Groups..."
+          aws ec2 describe-security-groups \
+            --filters "Name=group-name,Values=exercise-manager-*" \
+            --query 'SecurityGroups[].GroupId' \
+            --output text | while read sg; do
+            echo "Deleting SG: $sg"
+            aws ec2 delete-security-group --group-id "$sg" || true
+          done
+
+      - name: Manual Cleanup - VPCs
+        continue-on-error: true
+        run: |
+          echo "🧹 Deleting VPCs..."
+          
+          # Find exercise-manager VPCs
+          aws ec2 describe-vpcs \
+            --filters "Name=tag:Name,Values=exercise-manager-*" \
+            --query 'Vpcs[].VpcId' \
+            --output text | while read vpc; do
+            
+            echo "Processing VPC: $vpc"
+            
+            # Delete IGW attachments
+            aws ec2 describe-internet-gateways \
+              --filters "Name=attachment.vpc-id,Values=$vpc" \
+              --query 'InternetGateways[].InternetGatewayId' \
+              --output text | while read igw; do
+              echo "  Detaching IGW: $igw"
+              aws ec2 detach-internet-gateway --internet-gateway-id "$igw" --vpc-id "$vpc" || true
+              aws ec2 delete-internet-gateway --internet-gateway-id "$igw" || true
+            done
+            
+            # Delete subnets
+            aws ec2 describe-subnets \
+              --filters "Name=vpc-id,Values=$vpc" \
+              --query 'Subnets[].SubnetId' \
+              --output text | while read subnet; do
+              echo "  Deleting Subnet: $subnet"
+              aws ec2 delete-subnet --subnet-id "$subnet" || true
+            done
+            
+            # Delete route tables (except main)
+            aws ec2 describe-route-tables \
+              --filters "Name=vpc-id,Values=$vpc" \
+              --query 'RouteTables[?Associations[0].Main==`false`].RouteTableId' \
+              --output text | while read rt; do
+              echo "  Deleting Route Table: $rt"
+              aws ec2 delete-route-table --route-table-id "$rt" || true
+            done
+            
+            # Finally delete VPC
+            echo "  Deleting VPC: $vpc"
+            aws ec2 delete-vpc --vpc-id "$vpc" || true
+          done
+
+      - name: Verify Cleanup
+        run: |
+          echo ""
+          echo "✅ Cleanup complete!"
+          echo ""
+          echo "📊 Remaining resources check:"
+          echo ""
+          
+          echo "VPCs:"
+          aws ec2 describe-vpcs --query 'Vpcs[].{ID:VpcId,CIDR:CidrBlock,Name:Tags[?Key==`Name`].Value|[0]}' --output table
+          
+          echo ""
+          echo "Running Instances:"
+          aws ec2 describe-instances \
+            --filters "Name=instance-state-name,Values=running,pending" \
+            --query 'Reservations[].Instances[].{ID:InstanceId,Name:Tags[?Key==`Name`].Value|[0]}' \
+            --output table || echo "None"
+          
+          echo ""
+          echo "Load Balancers:"
+          aws elbv2 describe-load-balancers --query 'LoadBalancers[].LoadBalancerName' --output table || echo "None"
+          
+          echo ""
+          echo "✅ If you see only Default VPC above, you're good to go!"
