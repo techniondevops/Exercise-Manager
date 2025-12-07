@@ -1,123 +1,58 @@
 name: Deploy Exercise Manager
 
 on:
-  push:
-    branches: [ main ]
   workflow_dispatch:
 
-env:
-  AWS_REGION: us-east-1
-  APP_DIR: "python - app"
-
 jobs:
-  test:
-    name: Run Tests
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
-
-      - name: Basic validation
-        run: |
-          cd "$APP_DIR"
-          ls -la
-          echo "Files validated"
-
-  build-and-push:
-    name: Build Docker Image
-    needs: test
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
-
-      - name: Log in to Docker Hub
-        uses: docker/login-action@v2
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Build and push
-        run: |
-          cd python-app
-          docker build -t ${{ secrets.DOCKERHUB_USERNAME }}/exercise-manager:latest .
-          docker push ${{ secrets.DOCKERHUB_USERNAME }}/exercise-manager:latest
-
-  deploy-infrastructure:
+  deploy-all:
     name: Deploy to AWS
-    needs: build-and-push
     runs-on: ubuntu-latest
-    outputs:
-      master_ip: ${{ steps.get-ips.outputs.master_ip }}
-      master_private_ip: ${{ steps.get-ips.outputs.master_private_ip }}
-      lb_dns: ${{ steps.get-ips.outputs.lb_dns }}
-      
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v3
 
-      - name: Configure AWS credentials
+      - name: Configure AWS
         uses: aws-actions/configure-aws-credentials@v2
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
-          aws-region: ${{ env.AWS_REGION }}
+          aws-region: us-east-1
 
-      - name: Setup Terraform
+      - name: Build Docker
+        run: |
+          cd "python - app"
+          docker login -u ${{ secrets.DOCKERHUB_USERNAME }} -p ${{ secrets.DOCKERHUB_TOKEN }}
+          docker build -t ${{ secrets.DOCKERHUB_USERNAME }}/exercise-manager:latest .
+          docker push ${{ secrets.DOCKERHUB_USERNAME }}/exercise-manager:latest
+
+      - name: Terraform
         uses: hashicorp/setup-terraform@v2
         with:
           terraform_version: 1.5.0
           terraform_wrapper: false
 
-      - name: Terraform Init and Apply
+      - name: Deploy Infrastructure
         run: |
           cd terraform
           terraform init
-          terraform apply -auto-approve -var="public_key_content=${{ secrets.PUBLIC_KEY_CONTENT }}"
-          
-      - name: Get IPs
-        id: get-ips
-        run: |
-          cd terraform
-          echo "master_ip=$(terraform output -raw master_public_ip)" >> $GITHUB_OUTPUT
-          echo "master_private_ip=$(terraform output -raw master_private_ip)" >> $GITHUB_OUTPUT
-          echo "lb_dns=$(terraform output -raw load_balancer_dns)" >> $GITHUB_OUTPUT
-
-      - name: Wait for instances
-        run: sleep 60
-
-  configure-and-deploy:
-    name: Configure Cluster
-    needs: deploy-infrastructure
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
+          terraform apply -auto-approve
+          echo "LB_DNS=$(terraform output -raw load_balancer_dns)" >> $GITHUB_ENV
 
       - name: Setup SSH
         run: |
           mkdir -p ~/.ssh
           echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
+          sleep 60
 
-      - name: Install Ansible
+      - name: Deploy App
         run: |
           sudo apt-get update
           sudo apt-get install -y ansible
-
-      - name: Run Docker Deploy
-        run: |
           cd ansible
-          echo "[master]" > inventory.ini
-          echo "${{ needs.deploy-infrastructure.outputs.master_ip }} ansible_user=ubuntu" >> inventory.ini
-          echo "[workers]" >> inventory.ini
-          echo "[all:vars]" >> inventory.ini
-          echo "ansible_ssh_private_key_file=~/.ssh/id_rsa" >> inventory.ini
-          echo "ansible_ssh_common_args='-o StrictHostKeyChecking=no'" >> inventory.ini
-          ansible-playbook -i inventory.ini docker-deploy.yml
+          ansible-playbook -i inventory.ini docker-deploy.yml --private-key ~/.ssh/id_rsa
 
-      - name: Success
+      - name: Done
         run: |
-          echo "Deployment complete!"
-          echo "URL: http://${{ needs.deploy-infrastructure.outputs.lb_dns }}"
+          echo "✅ SUCCESS! App at: http://${{ env.LB_DNS }}"
