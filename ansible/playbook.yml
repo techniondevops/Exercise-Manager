@@ -125,7 +125,7 @@
         - kubectl
 
 - name: Initialize Kubernetes Master
-  hosts: master
+  hosts: masters
   become: yes
   vars:
     pod_network_cidr: "10.244.0.0/16"
@@ -138,7 +138,7 @@
 
     - name: Initialize Kubernetes cluster
       shell: |
-        kubeadm init --pod-network-cidr={{ pod_network_cidr }} --apiserver-advertise-address={{ hostvars['master']['private_ip'] }}
+        kubeadm init --pod-network-cidr={{ pod_network_cidr }} --apiserver-advertise-address={{ hostvars['k8s-master']['private_ip'] }}
       when: not k8s_initialized.stat.exists
       register: kubeadm_init
 
@@ -180,7 +180,7 @@
         flat: yes
 
 - name: Setup NFS Server on Master
-  hosts: master
+  hosts: masters
   become: yes
   tasks:
     - name: Install NFS server
@@ -239,7 +239,7 @@
         state: present
 
 - name: Configure kubectl on master
-  hosts: master
+  hosts: masters
   become_user: ubuntu
   tasks:
     - name: Wait for all nodes to be ready
