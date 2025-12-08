@@ -1,0 +1,105 @@
+name: Deploy Exercise Manager
+
+on:
+  workflow_dispatch:
+
+jobs:
+  deploy-all:
+    name: Deploy to AWS
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+         aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+         aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+         aws-region: us-east-1
+
+      - name: Build Docker
+        run: |
+          cd "python - app"
+          docker login -u ${{ secrets.DOCKERHUB_USERNAME }} -p ${{ secrets.DOCKERHUB_TOKEN }}
+          docker build -t ${{ secrets.DOCKERHUB_USERNAME }}/exercise-manager:latest .
+          docker push ${{ secrets.DOCKERHUB_USERNAME }}/exercise-manager:latest
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: 1.5.0
+          terraform_wrapper: false
+
+      - name: Setup SSH Key for Terraform
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keygen -y -f ~/.ssh/id_rsa > ~/.ssh/id_rsa.pub
+          echo "Public key generated:"
+          cat ~/.ssh/id_rsa.pub
+
+      - name: Deploy Infrastructure
+        run: |
+          cd terraform
+          terraform init
+          terraform apply -auto-approve \
+            -var="public_key_content=$(cat ~/.ssh/id_rsa.pub)"
+          echo "LB_DNS=$(terraform output -raw load_balancer_dns)" >> $GITHUB_ENV
+
+      - name: Wait for EC2 Instances
+        run: |
+          echo "Waiting 90 seconds for EC2 instances to initialize..."
+          sleep 90
+
+      - name: Test SSH Key
+        run: |
+          echo "Testing SSH key format..."
+          if ssh-keygen -y -f ~/.ssh/id_rsa >/dev/null 2>&1; then
+            echo " SSH key is valid"
+          else
+            echo " SSH key is invalid!"
+            exit 1
+          fi
+
+      - name: Install Ansible
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ansible
+
+      - name: Test SSH Connectivity
+        run: |
+          cd ansible
+          echo "Testing SSH connectivity to all hosts..."
+          ansible all -i inventory.ini -m ping --private-key ~/.ssh/id_rsa || \
+            (echo " SSH connectivity failed!" && exit 1)
+          echo " SSH connectivity successful!"
+
+      - name: Deploy App with Ansible
+        run: |
+          cd ansible
+          # Check which playbook exists
+          if [ -f "playbook.yml" ]; then
+            echo "Running playbook.yml..."
+            ansible-playbook -i inventory.ini playbook.yml --private-key ~/.ssh/id_rsa
+          elif [ -f "docker-deploy.yml" ]; then
+            echo "Running docker-deploy.yml..."
+            ansible-playbook -i inventory.ini docker-deploy.yml --private-key ~/.ssh/id_rsa
+          else
+            echo " No playbook found!"
+            ls -la
+            exit 1
+          fi
+
+      - name: Done
+        run: |
+          echo "============================================"
+          echo " SUCCESS! App deployed!"
+          echo "============================================"
+          echo ""
+          echo "Application URL: http://${{ env.LB_DNS }}"
+          echo ""
+          echo "Wait 2-3 minutes for health checks, then open the URL"
+          echo "============================================"

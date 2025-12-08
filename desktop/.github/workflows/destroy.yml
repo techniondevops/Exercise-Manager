@@ -1,0 +1,88 @@
+name: Destroy Infrastructure
+
+on:
+  workflow_dispatch:
+
+env:
+  AWS_REGION: us-east-1
+
+jobs:
+  destroy:
+    name: Destroy AWS Infrastructure
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: 1.5.0
+          terraform_wrapper: false
+
+      - name: Create SSH Key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keygen -y -f ~/.ssh/id_rsa > ~/.ssh/id_rsa.pub
+
+      - name: Terraform Init
+        run: |
+          cd terraform
+          terraform init
+
+      - name: Terraform Destroy
+        run: |
+          cd terraform
+          terraform destroy -auto-approve \
+            -var="public_key_content=$(cat ~/.ssh/id_rsa.pub)" || true
+
+      - name: Manual Cleanup (if Terraform fails)
+        if: failure()
+        run: |
+          echo "Cleaning up remaining resources..."
+          
+          # Delete Load Balancers
+          aws elbv2 describe-load-balancers --query 'LoadBalancers[?contains(LoadBalancerName, `exercise-manager`)].LoadBalancerArn' --output text | \
+            xargs -I {} aws elbv2 delete-load-balancer --load-balancer-arn {}
+          
+          sleep 30
+          
+          # Delete Target Groups
+          aws elbv2 describe-target-groups --query 'TargetGroups[?contains(TargetGroupName, `exercise-manager`)].TargetGroupArn' --output text | \
+            xargs -I {} aws elbv2 delete-target-group --target-group-arn {}
+          
+          # Delete Key Pairs
+          aws ec2 delete-key-pair --key-name exercise-manager-key || true
+          
+          # Terminate Instances
+          aws ec2 describe-instances \
+            --filters "Name=tag:Name,Values=exercise-manager-*" "Name=instance-state-name,Values=running,stopped" \
+            --query 'Reservations[].Instances[].InstanceId' --output text | \
+            xargs -I {} aws ec2 terminate-instances --instance-ids {}
+          
+          echo "✅ Cleanup attempted"
+
+      - name: Verify Cleanup
+        run: |
+          echo "🔍 Checking for remaining resources..."
+          
+          echo "Load Balancers:"
+          aws elbv2 describe-load-balancers --query 'LoadBalancers[?contains(LoadBalancerName, `exercise-manager`)].LoadBalancerName' || true
+          
+          echo "Instances:"
+          aws ec2 describe-instances \
+            --filters "Name=tag:Name,Values=exercise-manager-*" "Name=instance-state-name,Values=running,stopped,pending" \
+            --query 'Reservations[].Instances[].InstanceId' || true
+          
+          echo "✅ Destroy workflow completed"
